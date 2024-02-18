@@ -1,5 +1,6 @@
 local mod = require 'core/mods'
 local music = require 'lib/musicutil'
+local voice = require 'lib/voice'
 
 if note_players == nil then
     note_players = {}
@@ -10,6 +11,13 @@ local function freq_to_note_num_float(freq)
     local ratio = freq/reference
     return 60 + 12*math.log(ratio)/math.log(2)
 end
+
+local freq_params = {
+    "nb_ansible_freq_1",
+    "nb_ansible_freq_2",
+    "nb_ansible_freq_3",
+    "nb_ansible_freq_4",
+}
 
 local function add_player(idx)
     local player = {
@@ -100,8 +108,106 @@ local function add_player(idx)
     note_players["ansible "..idx] = player
 end
 
+local function add_poly_player()
+    local player = {
+        alloc = voice.new(4, voice.MODE_LRU),
+        voices = 4,
+        notes = {},
+    }
+
+    function player:add_params()
+        params:add_group("nb_ansible_poly", "ansible poly", 3)
+        params:add_number("nb_ansible_poly_voices", "voices", 2, 4, 4)
+        params:set_action("nb_ansible_poly_voices", function(n)
+            self.voices = n
+            self:stop_all()
+        end)
+        params:add_control("nb_ansible_portomento_poly", "portomento", controlspec.new(0.0, 1, 'taper', 0, 0.0, "s"))
+        params:set_action("nb_ansible_portomento_poly", function(p)
+            for idx = 1,params:get("nb_ansible_poly_voices") do
+                crow.ii.ansible.cv_slew(idx, math.floor(p*1000))
+            end
+        end)
+        params:add_binary("nb_ansible_tune_poly", "tune", "trigger")
+        params:set_action("nb_ansible_tune_poly", function()
+            clock.run(function()
+                for i = 1,params:get("nb_ansible_poly_voices") do
+                    local p = note_players["ansible "..i]
+                    p:tune()
+                    clock.sleep(12)
+                end
+            end)
+        end)
+        params:hide("nb_ansible_poly")
+    end
+
+    function player:active()
+        params:show("nb_ansible_poly")
+        _menu.rebuild_params()
+    end
+
+    function player:inactive()
+        params:hide("nb_ansible_poly")
+        _menu.rebuild_params()
+    end
+
+    function player:note_on(note, vel)
+        local slot = self.notes[note]
+        if slot == nil then
+            slot = self.alloc:get()
+            slot.count = 1
+        end
+        slot.on_release = function()
+            crow.ii.ansible.trigger(slot.id, 0)
+        end
+        self.notes[note] = slot
+        local halfsteps = note - freq_to_note_num_float(params:get(freq_params[slot.id]))
+        local v8 = halfsteps/12
+        -- print("v8", v8)
+        crow.ii.ansible.cv(slot.id, v8)
+        crow.ii.ansible.trigger(slot.id, 1)
+    end
+
+    function player:pitch_bend(note, val)
+        local slot = self.notes[note]
+        if slot ~= nil then
+            local halfsteps = note + val - freq_to_note_num_float(params:get(freq_params[slot.id]))
+            local v8 = halfsteps/12
+            crow.ii.ansible.cv(slot.id, v8)
+        end
+    end
+
+    function player:note_off(note)
+        local slot = self.notes[note]
+        if slot ~= nil then
+            self.alloc:release(slot)
+        end
+        self.notes[note] = nil
+    end
+
+    function player:describe(note)
+        return {
+            name = "ansible poly",
+            supports_bend = true,
+            supports_slew = true,
+            note_mod_targets = {},
+            modulate_description = "unsupported",
+        }
+    end
+
+    function player:stop_all()
+        crow.ii.ansible.trigger(0, 0)
+        self.notes = {}
+        self.alloc = voice.new(self.voices, voice.MODE_LRU)
+    end
+
+    note_players["ansible poly"] = player
+end
+
 mod.hook.register("script_pre_init", "nb ansible pre init", function()
     for i=1,4 do
         add_player(i)
     end
+    print("dooo dooooo")
+    add_poly_player()
 end)
